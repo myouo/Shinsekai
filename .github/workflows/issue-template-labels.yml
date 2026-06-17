@@ -20,6 +20,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: issue-template-labels-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   apply-labels:
     runs-on: ubuntu-latest
@@ -42,6 +46,7 @@ jobs:
           import re
           import subprocess
           import sys
+          import urllib.parse
           from typing import Any
 
           repo = os.environ["REPO"]
@@ -70,6 +75,7 @@ jobs:
               "p2": ("fbca04", "Priority 2"),
               "p3": ("0e8a16", "Priority 3"),
           }
+          AUTO_MANAGED_LABELS = set(LABEL_STYLES)
 
 
           def gh_api(*args: str, input_json: Any | None = None, check: bool = True) -> str:
@@ -115,9 +121,9 @@ jobs:
               ]
 
 
-          def parse_labels(body: str | None) -> list[str]:
+          def parse_labels(body: str | None) -> list[str] | None:
               if not body:
-                  return []
+                  return None
 
               lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
               start = None
@@ -126,7 +132,7 @@ jobs:
                       start = index + 1
                       break
               if start is None:
-                  return []
+                  return None
 
               block: list[str] = []
               for line in lines[start:]:
@@ -165,6 +171,9 @@ jobs:
 
                   # Stop when the labels list is followed by unrelated prose.
                   break
+
+              if not in_labels_list:
+                  return None
 
               return labels
 
@@ -241,13 +250,21 @@ jobs:
           def apply_issue_labels(issue: dict[str, Any], repo_labels: dict[str, str]) -> None:
               issue_number = issue["number"]
               requested_labels = parse_labels(issue.get("body"))
-              if not requested_labels:
+              if requested_labels is None:
                   print(f"#{issue_number}: no template labels found")
                   return
 
-              existing_issue_labels = {
-                  label["name"].lower()
+              existing_issue_label_names = [
+                  label["name"]
                   for label in issue.get("labels", [])
+              ]
+              existing_issue_labels = {
+                  label.lower()
+                  for label in existing_issue_label_names
+              }
+              requested_label_keys = {
+                  requested_label.lower()
+                  for requested_label in requested_labels
               }
 
               labels_to_add: list[str] = []
@@ -257,22 +274,41 @@ jobs:
                       labels_to_add.append(label)
                       existing_issue_labels.add(label.lower())
 
-              if not labels_to_add:
+              labels_to_remove = [
+                  label
+                  for label in existing_issue_label_names
+                  if label.lower() in AUTO_MANAGED_LABELS
+                  and label.lower() not in requested_label_keys
+              ]
+
+              if not labels_to_add and not labels_to_remove:
                   print(f"#{issue_number}: labels already up to date")
                   return
 
-              print(f"#{issue_number}: adding labels {labels_to_add}")
+              if labels_to_remove:
+                  print(f"#{issue_number}: removing labels {labels_to_remove}")
+              if labels_to_add:
+                  print(f"#{issue_number}: adding labels {labels_to_add}")
               if dry_run:
                   return
 
-              gh_api(
-                  f"repos/{repo}/issues/{issue_number}/labels",
-                  "--method",
-                  "POST",
-                  "--input",
-                  "-",
-                  input_json={"labels": labels_to_add},
-              )
+              for label in labels_to_remove:
+                  encoded_label = urllib.parse.quote(label, safe="")
+                  gh_api(
+                      f"repos/{repo}/issues/{issue_number}/labels/{encoded_label}",
+                      "--method",
+                      "DELETE",
+                  )
+
+              if labels_to_add:
+                  gh_api(
+                      f"repos/{repo}/issues/{issue_number}/labels",
+                      "--method",
+                      "POST",
+                      "--input",
+                      "-",
+                      input_json={"labels": labels_to_add},
+                  )
 
 
           if event_name == "workflow_dispatch":
