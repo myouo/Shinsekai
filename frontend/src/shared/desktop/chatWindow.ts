@@ -85,25 +85,27 @@ export async function closeChatSurface(options: CloseChatSurfaceOptions = {}) {
     return;
   }
 
-  if (options.closeRuntime && shouldCloseReactChatRuntime(options.snapshot)) {
-    try {
-      await options.closeRuntime();
-      logChatWindow("closeChatSurface runtime_closed=true");
-    } catch {
-      // Ignore runtime close failures here and still allow the user to leave the chat surface.
-      logChatWindow("closeChatSurface runtime_closed=false");
-    }
-  }
+  const closeRuntimePromise =
+    options.closeRuntime && shouldCloseReactChatRuntime(options.snapshot)
+      ? options.closeRuntime().then(
+          () => {
+            logChatWindow("closeChatSurface runtime_closed=true");
+          },
+          () => {
+            // Ignore runtime close failures here and still allow the user to leave the chat surface.
+            logChatWindow("closeChatSurface runtime_closed=false");
+          },
+        )
+      : undefined;
 
   const path = options.webPath ?? "/settings/launch";
   if (options.navigate) {
     options.navigate(path);
     logChatWindow(`closeChatSurface navigated path=${path}`);
-    return;
-  }
-
-  if (typeof window !== "undefined") {
+  } else if (typeof window !== "undefined") {
     window.location.hash = `#${path}`;
     logChatWindow(`closeChatSurface hash path=${path}`);
   }
+
+  await closeRuntimePromise;
 }

@@ -1111,6 +1111,16 @@ export function createBrowserPreviewPlatform(): ShinsekaiPlatform {
         characterMemories.set(agentId, existing);
         return delay(existing);
       },
+      async searchMemories({ limit = 200, name, query }) {
+        const agentId = name || "user";
+        const existing = await this.listMemories(agentId);
+        const normalizedQuery = query.trim().toLowerCase();
+        const memories = normalizedQuery
+          ? existing.memories.filter((memory) => memory.memory.toLowerCase().includes(normalizedQuery))
+          : existing.memories;
+        const limitedMemories = memories.slice(0, limit);
+        return delay({ agentId, count: limitedMemories.length, memories: limitedMemories });
+      },
       async remember(name, content) {
         const agentId = name || "user";
         const current = characterMemories.get(agentId) ?? { agentId, count: 0, memories: [] };
@@ -1292,6 +1302,7 @@ export function createBrowserPreviewPlatform(): ShinsekaiPlatform {
           socks5_proxy_url: "",
           source: "browser-preview",
         }),
+      getMemoryStatus: () => delay({ status: "ready" as const }),
       getTtsBundleRecommendation: () =>
         delay({
           gpus: [{ device: "NVIDIA GeForce RTX 4070", vendor: "NVIDIA", vram_gb: 12 }],

@@ -124,6 +124,23 @@ def _process_return_code(process: subprocess.Popen[bytes]) -> int | None:
     return process.poll()
 
 
+def _chat_runtime_closing(state: BridgeState) -> bool:
+    lock = getattr(state, "chat_runtime_lock", None)
+    if lock is None:
+        return bool(getattr(state, "chat_runtime_closing", False))
+    with lock:
+        return bool(getattr(state, "chat_runtime_closing", False))
+
+
+def _set_chat_runtime_closing(state: BridgeState, closing: bool) -> None:
+    lock = getattr(state, "chat_runtime_lock", None)
+    if lock is None:
+        state.chat_runtime_closing = closing
+        return
+    with lock:
+        state.chat_runtime_closing = closing
+
+
 def _chat_log_path() -> Path:
     log_dir = _project_root() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -414,6 +431,8 @@ def _launch_chat(
             f"--room_id={room_id}",
             f"--tts={tts_slug}",
         ]
+        if character_names:
+            args.append(f"--characters={json.dumps(character_names, ensure_ascii=False)}")
         if stream_endpoint:
             args.append(f"--stream-endpoint={stream_endpoint}")
         if workflow_path:
@@ -422,6 +441,24 @@ def _launch_chat(
         env["EASYAI_PROJECT_ROOT"] = str(project_root)
         env["SHINSEKAI_APP_ROOT"] = str(app_root)
         env["SHINSEKAI_SUPPRESS_MAIN_ERROR_DIALOG"] = "1"
+        api_config = state.config_manager.config.api_config
+        env["SHINSEKAI_MEMORY_AUTO_ENABLED"] = "1" if bool(getattr(api_config, "memory_auto_enabled", True)) else "0"
+        env["SHINSEKAI_MEMORY_EXTRACT_INTERVAL_TURNS"] = str(
+            max(1, int(getattr(api_config, "memory_extract_interval_turns", 5) or 5))
+        )
+        env["SHINSEKAI_MEMORY_SEARCH_LIMIT"] = str(
+            max(1, int(getattr(api_config, "memory_search_limit", 5) or 5))
+        )
+        env["SHINSEKAI_MEMORY_RECENT_BUFFER_MESSAGES"] = str(
+            max(2, int(getattr(api_config, "memory_recent_buffer_messages", 16) or 16))
+        )
+        chat_stream = getattr(state, "chat_stream", None)
+        memory_service_base = str(getattr(chat_stream, "http_base", "") or "").strip()
+        if memory_service_base:
+            env["SHINSEKAI_MEMORY_SERVICE_URL"] = f"{memory_service_base.rstrip('/')}/api/memory"
+            env["SHINSEKAI_MEMORY_SERVICE_OWNER"] = "0"
+        if str(getattr(state, "auth_token", "") or "").strip():
+            env["SHINSEKAI_MEMORY_SERVICE_TOKEN"] = str(state.auth_token)
 
         if getattr(sys, "frozen", False):
             candidates = _main_exe_candidates(state)
@@ -459,17 +496,20 @@ def _close_chat(
 ) -> dict[str, Any]:
     global _main_chat_process
 
-    session_id = str(state.chat_session.get("sessionId") or "").strip()
-    chat_stream = getattr(state, "chat_stream", None)
-    _chat_debug_log(f"close_chat start session={session_id} reason={reason} wait_timeout={wait_timeout}")
-    if session_id and chat_stream is not None:
-        snapshot = chat_stream.get_snapshot(session_id)
-        if not isinstance(snapshot, dict) or not str(snapshot.get("sessionClosedReason") or "").strip():
-            chat_stream.close_session(session_id, reason=reason)
+    _set_chat_runtime_closing(state, True)
+    try:
+        session_id = str(state.chat_session.get("sessionId") or "").strip()
+        chat_stream = getattr(state, "chat_stream", None)
+        _chat_debug_log(f"close_chat start session={session_id} reason={reason} wait_timeout={wait_timeout}")
+        if session_id and chat_stream is not None:
+            snapshot = chat_stream.get_snapshot(session_id)
+            if not isinstance(snapshot, dict) or not str(snapshot.get("sessionClosedReason") or "").strip():
+                chat_stream.close_session(session_id, reason=reason)
 
-    shutdown_active_chat_process(wait_timeout=wait_timeout)
-
-    _chat_debug_log(f"close_chat completed session={session_id}")
+        shutdown_active_chat_process(wait_timeout=wait_timeout)
+        _chat_debug_log(f"close_chat completed session={session_id}")
+    finally:
+        _set_chat_runtime_closing(state, False)
     return _chat_snapshot(state, "idle", "")
 
 
@@ -681,6 +721,10 @@ def _chat_snapshot(
     runtime_mode = _chat_runtime_mode(state)
     experimental_features = _chat_experimental_features(state)
     user_display_name = _chat_user_display_name(state)
+    runtime_state = {
+        "chatProcessRunning": _chat_process_running(),
+        "chatRuntimeClosing": _chat_runtime_closing(state),
+    }
     if session_id and chat_stream is not None:
         snapshot = chat_stream.get_snapshot(session_id)
         if snapshot is not None:
@@ -702,6 +746,7 @@ def _chat_snapshot(
             if status is not None:
                 next_snapshot["status"] = status
                 next_snapshot["numericInfo"] = status
+            next_snapshot.update(runtime_state)
             if extra:
                 next_snapshot.update(extra)
             return next_snapshot
@@ -724,6 +769,7 @@ def _chat_snapshot(
         "statusMessage": message,
         "userDisplayName": user_display_name,
         "voiceLanguage": voice_language,
+        **runtime_state,
         **(extra or {}),
     }
 

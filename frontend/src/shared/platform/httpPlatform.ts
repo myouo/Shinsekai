@@ -22,6 +22,7 @@ import type {
   Background,
   BackgroundTranslateResult,
   Character,
+  CharacterMemory,
   CharacterMemoryList,
   CharacterSettingResult,
   Mem0Status,
@@ -121,6 +122,32 @@ function bridgeUrl(baseUrl: string, path: string) {
     throw new Error("Bridge URL must stay on the active bridge origin");
   }
   return url.toString();
+}
+
+function normalizeCharacterMemoryRow(row: unknown): CharacterMemory {
+  if (row && typeof row === "object") {
+    const record = row as Record<string, unknown>;
+    return {
+      id: String(record.id ?? ""),
+      memory: String(record.memory ?? record.content ?? record.text ?? ""),
+    };
+  }
+  return { id: "", memory: String(row ?? "") };
+}
+
+function normalizeCharacterMemoryList(payload: unknown, fallbackAgentId: string): CharacterMemoryList {
+  const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const rawMemories = Array.isArray(record.memories)
+    ? record.memories
+    : Array.isArray(record.results)
+      ? record.results
+      : [];
+  const memories = rawMemories.map(normalizeCharacterMemoryRow);
+  return {
+    agentId: String(record.agentId ?? record.agent_id ?? (fallbackAgentId || "user")),
+    count: typeof record.count === "number" ? record.count : memories.length,
+    memories,
+  };
 }
 
 function openBridgeWindow(apiBase: string, path: string) {
@@ -849,6 +876,13 @@ export function createHttpPlatform(baseUrl: string, authToken = ""): ShinsekaiPl
           body: JSON.stringify({ name }),
           method: "POST",
         }),
+      searchMemories: async ({ limit = 200, name, query }) => {
+        const result = await requestJson<unknown>(apiBase, "/api/memory/search", {
+          body: JSON.stringify({ characterName: name, limit, query }),
+          method: "POST",
+        });
+        return normalizeCharacterMemoryList(result, name);
+      },
       remember: (name, content) =>
         requestJson<CharacterMemoryList>(apiBase, "/api/characters/memories/add", {
           body: JSON.stringify({ content, name }),
@@ -923,6 +957,11 @@ export function createHttpPlatform(baseUrl: string, authToken = ""): ShinsekaiPl
         }),
       get: () => requestJson<AppConfig>(apiBase, "/api/config"),
       detectNetworkProxy: () => requestJson<NetworkProxyDetectionResult>(apiBase, "/api/config/network-proxy/detect"),
+      getMemoryStatus: () =>
+        requestJson<Mem0Status>(apiBase, "/api/memory/status", {
+          body: "{}",
+          method: "POST",
+        }),
       getTtsBundleRecommendation: () =>
         requestJson<TtsBundleRecommendation>(apiBase, "/api/config/tts-bundle/recommendation"),
       saveApi: (config: ApiConfig) =>

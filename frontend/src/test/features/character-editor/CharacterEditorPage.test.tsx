@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CharacterEditorPage } from "../../../features/character-editor/CharacterEditorPage";
+import { CharacterEditorPage, mergeSprites } from "../../../features/character-editor/CharacterEditorPage";
 import type { Character } from "../../../entities/config/types";
 import { I18nProvider } from "../../../shared/i18n/I18nProvider";
 import { sampleConfig } from "../../../shared/platform/sampleData";
@@ -28,6 +28,7 @@ const mockInstallMissingRuntimeDependency = vi.fn();
 const mockListCharacterMemories = vi.fn();
 const mockOpenExternal = vi.fn();
 const mockRememberCharacterMemory = vi.fn();
+const mockSearchCharacterMemories = vi.fn();
 const mockSaveSpriteScale = vi.fn();
 const mockSaveSpriteVoiceText = vi.fn();
 const mockSaveSpriteVoiceType = vi.fn();
@@ -126,6 +127,8 @@ vi.mock("../../../entities/character/repository", () => ({
   listCharacterMemories: (name: string) => mockListCharacterMemories(name),
   listCharacters: () => mockListCharacters(),
   rememberCharacterMemory: (name: string, memory: string) => mockRememberCharacterMemory(name, memory),
+  searchCharacterMemories: (input: { limit?: number; name: string; query: string }) =>
+    mockSearchCharacterMemories(input),
   saveCharacter: (character: Character, originalName?: string) => mockSaveCharacter(character, originalName),
   saveCharacterEmotionTags: (name: string, emotionTags: string) => mockSaveCharacterEmotionTags(name, emotionTags),
   saveSpriteScale: (name: string, scale: number) => mockSaveSpriteScale(name, scale),
@@ -170,6 +173,28 @@ function renderPage() {
     </QueryClientProvider>,
   );
 }
+
+describe("mergeSprites", () => {
+  it("falls back to index only when rewritten paths keep the same list shape", () => {
+    const current = {
+      ...structuredClone(character),
+      sprites: [
+        { path: "D:/old/sprite-a.png", voice_type: "preset" as const },
+        { path: "D:/old/sprite-b.png", voice_type: "reference" as const },
+      ],
+    };
+
+    expect(
+      mergeSprites([{ path: "D:/new/sprite-a.png" }, { path: "D:/new/sprite-b.png" }], current).map(
+        (sprite) => sprite.voice_type,
+      ),
+    ).toEqual(["preset", "reference"]);
+
+    expect(mergeSprites([{ path: "D:/new/sprite-b.png" }], current).map((sprite) => sprite.voice_type)).toEqual([
+      undefined,
+    ]);
+  });
+});
 
 describe("CharacterEditorPage", () => {
   beforeEach(() => {
@@ -233,6 +258,7 @@ describe("CharacterEditorPage", () => {
         { id: "memory-2", memory },
       ],
     }));
+    mockSearchCharacterMemories.mockResolvedValue({ agentId: "Mika", count: 0, memories: [] });
     mockSaveCharacter.mockImplementation(async (input: Character) => input);
     mockSaveCharacterEmotionTags.mockImplementation(async (_name: string, emotionTags: string) => ({
       ...character,
@@ -500,6 +526,55 @@ describe("CharacterEditorPage", () => {
     dialog = screen.getByRole("dialog", { name: "Delete all sprites" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(mockDeleteAllCharacterSprites).toHaveBeenCalledWith("Mika"));
+  });
+
+  it("keeps sprite voice types aligned by path after deleting a sprite", async () => {
+    const sprites = [
+      {
+        path: "D:/sprites/mika/sprite-a.png",
+        voice_path: "D:/voices/a.wav",
+        voice_type: "preset" as const,
+      },
+      {
+        path: "D:/sprites/mika/sprite-b.png",
+        voice_path: "D:/voices/b.wav",
+        voice_type: "fallback" as const,
+      },
+      {
+        path: "D:/sprites/mika/sprite-c.png",
+        voice_path: "D:/voices/c.wav",
+        voice_text: "reference line",
+        voice_type: "reference" as const,
+      },
+    ];
+    const originalCharacter = {
+      ...structuredClone(character),
+      emotion_tags: "Sprite 1: first\nSprite 2: second\nSprite 3: third\n",
+      sprites,
+    };
+    const updatedCharacter = {
+      ...originalCharacter,
+      emotion_tags: "Sprite 1: second\nSprite 2: third\n",
+      sprites: sprites.slice(1),
+    };
+    mockListCharacters.mockResolvedValueOnce([originalCharacter]).mockResolvedValue([updatedCharacter]);
+    mockDeleteCharacterSprite.mockResolvedValue(updatedCharacter);
+    renderPage();
+
+    await screen.findByDisplayValue("Mika");
+    expect(screen.getByRole("radio", { name: "Preset voice" })).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = screen.getByRole("dialog", { name: "Remove" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(mockDeleteCharacterSprite).toHaveBeenCalledWith("Mika", 0));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove" })).not.toBeInTheDocument());
+    expect(screen.getByTitle("sprite-b.png")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("radio", { name: "Fallback voice" })).toBeChecked();
+
+    fireEvent.click(screen.getByTitle("sprite-c.png"));
+    expect(screen.getByRole("radio", { name: "Reference voice" })).toBeChecked();
   });
 
   it("refreshes, adds, and deletes long-term memories", async () => {
