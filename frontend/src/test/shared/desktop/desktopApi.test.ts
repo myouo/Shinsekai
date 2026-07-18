@@ -24,6 +24,7 @@ import {
   installDesktopRuntimeProfile,
   installDesktopUpdate,
   isTauriDesktop,
+  isWindowsDesktopEnvironment,
   minimizeDesktopWindow,
   openDesktopChatWindow,
   onDesktopRuntimeProgress,
@@ -32,6 +33,7 @@ import {
   reloadDesktopFrontend,
   selectDesktopProjectRoot,
   startDesktopWindowDrag,
+  supportsTransparentDesktopClickThrough,
   toggleMaximizeDesktopWindow,
   closeDesktopWindow,
 } from "../../../shared/desktop/desktopApi";
@@ -44,6 +46,7 @@ describe("desktop API environment detection", () => {
     delete window.__SHINSEKAI_BRIDGE_RESTART_EVENTS_BOUND__;
     mockInvoke.mockReset();
     mockListen.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it("returns false in the browser preview environment", () => {
@@ -54,6 +57,16 @@ describe("desktop API environment detection", () => {
   it("detects Tauri internals when the desktop shell injects them", () => {
     window.__TAURI_INTERNALS__ = {};
     expect(isTauriDesktop()).toBe(true);
+  });
+
+  it("disables transparent desktop click-through on Windows", () => {
+    vi.stubGlobal("navigator", {
+      platform: "Win32",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    });
+
+    expect(isWindowsDesktopEnvironment()).toBe(true);
+    expect(supportsTransparentDesktopClickThrough()).toBe(false);
   });
 
   it("subscribes to bridge restart state events and mirrors them into window state", async () => {

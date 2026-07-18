@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { isTauriDesktop } from "../../shared/desktop/desktopApi";
+import { installMissingRuntimeDependency } from "../../entities/chat/repository";
+import {
+  isTauriDesktop,
+  supportsTransparentDesktopClickThrough,
+  writeDesktopRestartDebugLog,
+} from "../../shared/desktop/desktopApi";
 import { closeChatSurface } from "../../shared/desktop/chatWindow";
 import { useI18n } from "../../shared/i18n";
 import { normalizeThemeColor } from "../../shared/theme/appTheme";
@@ -47,6 +52,16 @@ import {
 } from "./runtimeConfig";
 import { useOptionalChatTheme } from "./theme/ChatThemeProvider";
 
+function logChatStage(message: string, data?: Record<string, unknown>) {
+  if (data) {
+    console.log(`[ChatStage] ${message}`, data);
+  } else {
+    console.log(`[ChatStage] ${message}`);
+  }
+  const suffix = data ? ` ${JSON.stringify(data)}` : "";
+  void writeDesktopRestartDebugLog(`ChatStage ${message}${suffix}`);
+}
+
 export function ChatStagePage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -61,6 +76,7 @@ export function ChatStagePage() {
   const [tokenUsageOpen, setTokenUsageOpen] = useState(false);
   const [toolbarConfigOpen, setToolbarConfigOpen] = useState(false);
   const voskModelState = useVoskModelAvailability();
+  const runtimeDependencyPromptRef = useRef("");
   const { showToast } = useToast();
   const { t } = useI18n();
   const theme = useOptionalChatTheme();
@@ -96,7 +112,8 @@ export function ChatStagePage() {
   const tokenUsageVisible = tokenUsageOpen && Boolean(viewModel.tokenUsageText);
   const modalOpen =
     toolbarConfigOpen || branchDialogOpen || historyDialogOpen || confirmClearHistory || confirmRevertUserIndex != null;
-  const clickThroughEnabled = standaloneDesktopWindow && transparentBackground && !modalOpen;
+  const clickThroughEnabled =
+    standaloneDesktopWindow && supportsTransparentDesktopClickThrough() && transparentBackground && !modalOpen;
   const dialogToolbarPlacement =
     typeof themeStyle["--chat-dialog-toolbar-placement"] === "string"
       ? themeStyle["--chat-dialog-toolbar-placement"]
@@ -159,6 +176,24 @@ export function ChatStagePage() {
   });
 
   useEffect(() => {
+    logChatStage("mounted", {
+      pathname: location.pathname,
+      standaloneDesktopWindow,
+    });
+    return () => logChatStage("unmounted", { pathname: location.pathname });
+  }, [location.pathname, standaloneDesktopWindow]);
+
+  useEffect(() => {
+    logChatStage("session_state", {
+      hasSessionId: Boolean(state.sessionId),
+      hasWsUrl: Boolean(state.wsUrl),
+      status: state.status,
+      transportMode: state.transportMode ?? "",
+      transportState: state.transportState ?? "",
+    });
+  }, [state.sessionId, state.status, state.transportMode, state.transportState, state.wsUrl]);
+
+  useEffect(() => {
     if (!viewModel.layers.dialog) {
       setToolbarConfigOpen(false);
     }
@@ -185,6 +220,49 @@ export function ChatStagePage() {
       setRuntimeConfig((current) => (current.longPressTalk ? { ...current, longPressTalk: false } : current));
     }
   }, [runtimeConfig.longPressTalk, voskModelState.available, voskModelState.loading]);
+
+  useEffect(() => {
+    const dependencyError = state.runtimeDependencyError;
+    if (!dependencyError) {
+      return;
+    }
+    const promptKey = [dependencyError.moduleName, dependencyError.packageName, dependencyError.logPath ?? ""].join(
+      "\n",
+    );
+    if (runtimeDependencyPromptRef.current === promptKey) {
+      return;
+    }
+    runtimeDependencyPromptRef.current = promptKey;
+    const shouldInstall = window.confirm(
+      t("runtimeDeps.installConfirm", {
+        module: dependencyError.moduleName,
+        package: dependencyError.packageName,
+      }),
+    );
+    if (!shouldInstall) {
+      showToast({
+        kind: "error",
+        message: state.dialogText || dependencyError.message,
+        title: t("runtimeDeps.installTitle"),
+      });
+      return;
+    }
+    void installMissingRuntimeDependency({ moduleName: dependencyError.moduleName })
+      .then((result) => {
+        showToast({
+          kind: "success",
+          message: result.message || t("runtimeDeps.installSucceeded"),
+          title: t("runtimeDeps.installTitle"),
+        });
+      })
+      .catch((error) => {
+        showToast({
+          kind: "error",
+          message: error instanceof Error ? error.message : t("runtimeDeps.installFailed"),
+          title: t("runtimeDeps.installFailed"),
+        });
+      });
+  }, [showToast, state.dialogText, state.runtimeDependencyError, t]);
 
   const submit = () => {
     const text = viewModel.inputDraft.trim();
@@ -297,23 +375,24 @@ export function ChatStagePage() {
     setRuntimeConfig((current) => ({ ...current, auto: !current.auto }));
   }, []);
 
+  const closeSurface = useCallback(() => {
+    return closeChatSurface({
+      closeRuntime: closeChatRuntime,
+      navigate,
+      snapshot: state,
+    });
+  }, [navigate, state]);
+
   useChatStageKeyboardShortcuts({
     disabled: modalOpen,
     onAdvance: advanceDialog,
+    onClose: closeSurface,
     onToggleAuto: toggleAuto,
   });
 
   const openHistoryDialog = () => {
     setHistoryDialogOpen(true);
     void refreshHistory();
-  };
-
-  const closeSurface = () => {
-    return closeChatSurface({
-      closeRuntime: closeChatRuntime,
-      navigate,
-      snapshot: state,
-    });
   };
 
   const dialogSurfaceVisible = viewModel.layers.dialog || viewModel.layers.options;
